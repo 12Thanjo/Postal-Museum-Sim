@@ -1,0 +1,581 @@
+<!DOCTYPE html>
+<html>
+    <link rel="icon" href="favicon.ico">
+    <head>
+        <meta charset="UTF-8"/>
+        <title>Postal Museum Sim</title>
+    </head>
+    <body>
+        <script type="text/javascript">
+            JSON.stringify_map = function(map){
+              return JSON.stringify([...map]);
+            }
+            JSON.parse_map = function(jsonStr){
+              return new Map(JSON.parse(jsonStr));
+            }
+            const remote = require("electron").remote;
+            const { shell } = require('electron');
+            var currentWindow = remote.getCurrentWindow();
+            currentWindow.maximize();
+
+            document.addEventListener("keydown", function (e) {
+                if(e.which === 123){
+                    if(currentWindow.isDevToolsOpened()){
+                        remote.getCurrentWindow().closeDevTools();
+                    }else{
+                        remote.getCurrentWindow().webContents.openDevTools();
+                    }
+                }else if(e.which === 116){
+                    location.reload();
+                }
+            });
+
+            var window_location = window.location.pathname.substr(1, window.location.pathname.length - 8);
+
+            const {dialog} = require('electron').remote;
+            path = require('path');
+
+            size = 12;
+            using_rooms = false;
+            current_room = 1;
+
+            colors = [0x000000, 0xffeeaa, 0xcc00ff, 0x0000ff, 0x00ff00, 0xffff00, 0xff6600, 0xff0000];
+            color_population = [0, 1, 2, 3, 4, 5, 6, 7];
+            next_color = function(color){
+                var output = 0;
+                for(var i=0; i<colors.length;i++){
+                    if(colors[i] == color){
+                        output = i + 1;
+                        break;
+                    }
+                }
+                if(output == colors.length){
+                    output = 0;
+                }
+                return colors[output];
+            }
+
+            previous_color = function(color){
+                var output = 0;
+                for(var i=0; i<colors.length;i++){
+                    if(colors[i] == color){
+                        output = i - 1;
+                        break;
+                    }
+                }
+                if(output == -1){
+                    output = colors.length - 1;
+                }
+                return colors[output];
+            }
+
+
+            virtuosity = require('virtuosity');
+            virtuosity.setupCSS();
+            virtuosity.engine2d.canvas.create(1, {
+                poll: 64,
+                load: ()=>{
+                    virtuosity.engine2d.addToLoadQueue.image('map', 'map.png');
+                },
+                create: ()=>{
+                    virtuosity.engine2d.add.image('map', 50, 50, 'map', (img)=>{
+                        map = img;
+                        map.width *= 1.6;
+                        map.height *= 1.6;
+                        map.alpha = 0;
+                        
+                        /////////////////////////////////////////////////////////////////
+
+                        grid = [];
+                        collision_map = [];
+
+                        imported_collision_grid = JSON.parse(virtuosity.files.readFile(__dirname + '/grid.JSON'));
+                        imported_room_grid = JSON.parse(virtuosity.files.readFile(__dirname + '/rooms.JSON'));
+                        for(var i=70; i<map.width-20; i += size){
+                            var inner_grid = [];
+                            var inner_collision = [];
+                            for(var j=70; j<map.height+40; j += size){
+                                var square = imported_collision_grid[(i-70)/size][(j-70)/size];
+                                var box = new virtuosity.engine2d.graphics.Rectangle(i, j, size, size, colors[square]);
+                                box.alpha = 1;
+                                inner_grid.push(box);
+
+                                if(square == null || square == 0){
+                                    inner_collision.push(1);
+                                }else{
+                                    inner_collision.push(0);
+                                }
+                            }
+                            grid.push(inner_grid);
+                            collision_map.push(inner_collision);
+                        }
+
+
+                        PF = require('pathfinding');
+                        finder = new PF.AStarFinder({
+                            allowDiagonal: true
+                        });
+
+
+
+                        exits = [[63, 25], [61, 46]];
+                        check_escape = function(x, y){
+                            var escaped = false;
+                            for(var i = exits.length - 1; i>=0; i--){
+                                if(exits[i][0] == (x-71)/size && exits[i][1] == (y-71)/size){
+                                    escaped = true;
+                                    break;
+                                }
+                            }
+                            return escaped;
+                        }
+
+                        collision = new PF.Grid(collision_map);
+                        set_walkable = function(x, y, bool){
+                            collision.nodes[(x-71)/size][(y-71)/size].walkable = bool;
+                        }
+
+                        calc_path = function(x, y, exit_x, exit_y){
+                            return finder.findPath(y, x, exit_y, exit_x, collision.clone());
+                        }
+
+                        num_walkable = function(){
+                            var num = 0;
+                            collision.nodes.forEach((row)=>{
+                                row.forEach((square)=>{
+                                    if(square.walkable){
+                                        num += 1;
+                                    }
+                                });
+                            });
+                            return num;
+                        }
+
+                        calculate_distance = function(x1, y1, x2, y2){
+                            return Math.sqrt(Math.pow((x2 - x1), 2) + Math.pow((y2 - y1), 2));
+                        }
+
+                        find_path = function(x, y){
+                            var options = [];
+                            exits.forEach((exit)=>{
+                                var calculated_path = calc_path(x, y, exit[0], exit[1]);
+                                if(calculated_path.length > 0){
+                                    options.push(calculated_path);
+                                }
+                            });
+
+                            if(options.length != 0){
+                                var shortest = options[0];
+                                for(var i=1; i<options.length;i++){
+                                    if(shortest.length > options[i].length){
+                                        shortest = options[i];
+                                    }
+                                }
+                                return shortest;
+                            }else{
+                                return [];
+                            }
+                        }
+                    });
+
+                    virtuosity.engine2d.add.text('saving', 5, 1020, "Saved", 30, (txt)=>{
+                        saved_text = txt;
+                        saved_text.anchor.y = 1;
+                        saved_text.holding_alpha = 0;
+                        saved_text.alpha = 0;
+                    });
+
+                    players = new Set();
+                    rooms = new Map([
+                        [1, new Set()],
+                        [2, new Set()],
+                        [3, new Set()],
+                        [4, new Set()],
+                        [5, new Set()]
+                    ]);
+                    Player = function(x, y){
+                        this.room = imported_room_grid[x][y];
+                        this.speed = Math.floor(Math.random()*3+1);
+                        this.DATA = {
+                            x: x*size+71,
+                            y: y*size+71
+                        }
+                        this.escaped = false;
+                        this.model = new virtuosity.engine2d.graphics.Circle(x*size+71, y*size+71, 4, 0x111111 * this.speed * 5);
+
+                        Object.defineProperty(this, "x", {
+                            get: ()=>{
+                                return this.DATA.x;
+                            }, set: (val)=>{
+                                this.model.x = val;
+                                this.DATA.x = val;
+                            }
+                        });
+
+
+                        Object.defineProperty(this, "y", {
+                            get: ()=>{
+                                return this.DATA.y;
+                            }, set: (val)=>{
+                                this.model.y = val;
+                                this.DATA.y = val;
+                            }
+                        });
+
+
+                        Object.defineProperty(this, "grid_x", {
+                            get: ()=>{
+                                return (this.DATA.x-71)/size;
+                            }
+                        });
+
+
+                        Object.defineProperty(this, "grid_y", {
+                            get: ()=>{
+                                return (this.DATA.y-71)/size;
+                            }
+                        });
+
+
+                        var best_path = find_path(this.grid_x, this.grid_y);
+                        var best_exit = best_path[best_path.length-1];
+                        this.exit = [best_exit[1], best_exit[0]];
+
+                        this.distance_to_exit = function(x, y){
+                            return calculate_distance(x, y, this.exit[0], this.exit[1]);
+                        }
+
+
+                        this.path = calc_path(this.grid_x, this.grid_y, this.exit[0], this.exit[1]);
+                        this.escape = function(times){
+                            //calculate path
+                            set_walkable(this.x, this.y, true);
+                            var potential_new_path = calc_path(this.grid_x, this.grid_y, this.exit[0], this.exit[1]); 
+                            if(potential_new_path.length == 0 && this.path.length != 0){
+                                if(collision.nodes[this.path[2][1]][this.path[2][0]].walkable){
+                                    this.path = this.path.splice(times, this.path.length);
+                                }else{
+                                    this.path = [];
+                                }
+                            }else{
+                                this.path = potential_new_path;
+                            }
+                            set_walkable(this.x, this.y, false);
+
+                            //player actions
+                            if(this.path[1] != null){//can move
+                                if(times > this.path.length-1){
+                                    times = this.path.length-1;
+                                }
+                                set_walkable(this.x, this.y, true);
+                                this.x = this.path[times][1]*size+71;
+                                this.y = this.path[times][0]*size+71;
+                                set_walkable(this.x, this.y, false);
+                            }else if(check_escape(this.x, this.y)){//escape?
+                                set_walkable(this.x, this.y, true);
+                                this.escaped = true;
+                                this.model.color = 0x00ff00;
+                            }else{//try and move anyways
+                                var potential_movement = [];
+                                var potential_movement_options = [[-1, -1], [0, -1], [1, -1], [-1, 0], [1, 0], [-1, 1], [0, 1], [1, 1]];
+
+
+                                potential_movement_options.forEach((option)=>{
+                                    var move = {
+                                        x: this.grid_x + option[0],
+                                        y: this.grid_y + option[1]
+                                    }
+
+                                    try{
+                                        if(collision.nodes[move.x][move.y].walkable){
+                                            move.distance = this.distance_to_exit(move.x, move.y);
+                                            potential_movement.push(move);
+                                        }
+                                    }catch{}
+                                });
+
+
+                                if(potential_movement.length > 0){
+                                    var best = {
+                                        x: this.grid_x,
+                                        y: this.grid_y,
+                                        distance: this.distance_to_exit(this.grid_x, this.grid_y)
+                                    }
+                                    for(var i=0; i<potential_movement.length;i++){
+                                        if(potential_movement[i].distance < best){
+                                            best = potential_movement[i].distance;
+                                        }
+                                    }
+                                    set_walkable(this.x, this.y, true);
+                                    this.x = best.x*size+71;
+                                    this.y = best.y*size+71;
+                                    set_walkable(this.x, this.y, false);
+                                }
+                            }
+                        }
+                        players.add(this);
+                        rooms.get(this.room).add(this);
+
+
+                        this.delete = function(){
+                            this.model.destroy();
+                            players.delete(this);
+                            rooms.get(this.room).delete(this);
+                        }
+                    }
+
+                    create_population = function(size){
+                        var x = Math.floor(Math.random()*69);
+                        var y = Math.floor(Math.random()*61);
+
+                        var ontop = false;
+                        players.forEach((player)=>{
+                            if(player.x == x*size+71 && player.y == y*size+71){
+                                ontop = true;
+                            }
+                        });
+
+                        if(imported_collision_grid[x][y] != null && imported_collision_grid[x][y] != 0 && !ontop && Math.random() < imported_collision_grid[x][y]*imported_collision_grid[x][y]/49){
+                            new Player(x, y);
+                        }else{
+                            create_population(0);
+                        }
+                        if(size > 1){
+                            create_population(size-1);
+                        }
+                    }
+
+                    running = false;
+                    itterations = 0;
+                    
+                    population = 0;
+                    lowest_population = 0;
+                    heighest_population = 0;
+
+                    data_file = __dirname + "/data.JSON";
+                    data = JSON.parse_map(virtuosity.files.readFile(data_file));
+
+                    escape_timer = new virtuosity.time.advancedInterval(1, ()=>{
+                        itterations += 1;
+                        players.forEach((player)=>{
+                            if( !using_rooms || (using_rooms && current_room == player.room) ){
+                                player.escape(player.speed);
+                                if(player.escaped){
+                                    player.delete();
+                                }
+                            }
+                        });
+
+                        if(rooms.get(current_room).size == 0){
+                            current_room += 1;
+                        }
+
+                        if(players.size == 0){
+                            console.log("Population: " + population + " | Itterations: " + itterations + " | rooms: " + using_rooms);
+                            escape_timer.stop();
+                            running = false;
+                            
+                            if(data.get(population + "," + using_rooms) == null){
+                                data.set(population + "," + using_rooms, {
+                                    p: population,
+                                    d: [],
+                                    r: using_rooms
+                                });
+                            }
+
+                            data.get(population + "," + using_rooms).d.push(itterations);
+
+                            virtuosity.files.writeFile(data_file, JSON.stringify_map(data));
+
+                            population += 1;
+                            if(population == heighest_population + 1){
+                                population = lowest_population;
+                                if(using_rooms){
+                                    using_rooms = false;
+                                }else{
+                                    using_rooms = true;
+                                }
+                            }
+
+                            players_escape(population);
+                        }
+                    });
+                    players_escape = function(){
+                        if(!running){
+                            running = true;
+
+                            current_room = 1;
+                            
+                            create_population(population);
+
+                            collision = new PF.Grid(collision_map);
+                            players.forEach((player)=>{
+                                set_walkable(player.x, player.y, false);
+                            });
+                            escape_timer.start();
+                            itterations = 0;
+                        }
+                    }
+
+                    // This is the function that the whole simulation is run from. This is inputted into the console
+                    run_sim = function(lowest, heighest, file){
+                        if(file != null){
+                            if(virtuosity.files.fileExists(file)){
+                                data = JSON.parse_map(virtuosity.files.readFile(file));
+                            }else{
+                                data = new Map();
+                            }
+                            data_file = file;
+                        }
+
+                        population = lowest;
+                        lowest_population = lowest;
+                        heighest_population = heighest;
+                        players_escape();
+                    }
+
+
+
+                    color_box = new virtuosity.engine2d.graphics.Box(1000, 200, 100, 100, 0x000000, 0);
+                    color_box.borderThickness = 5;
+                    color_box.borderColor = 0x333333;
+
+                    set_color = function(color){
+                        color_box.color = colors[color];
+                    }
+
+                    print_grid = function(){
+                        var output = [];
+                        grid.forEach((row)=>{
+                            var arr = [];
+                            row.forEach((box)=>{
+                                var printed = false;
+                                for(var i=0; i<colors.length;i++){
+                                    if(box.color == colors[i]){
+                                        printed = true;
+                                        arr.push(color_population[i]);
+                                        break;
+                                    }
+                                }
+
+                                if(!printed){
+                                    arr.push(0);
+                                }
+                            });
+                            output.push(arr);
+                        });
+                        virtuosity.files.writeFile(__dirname + '/grid.JSON', JSON.stringify(output));
+                        saved_text.alpha = 1;
+                        saved_text.holding_alpha = 3.5;
+                    }
+
+                    clear_grid = function(){
+                        var output = [];
+                        grid.forEach((row)=>{
+                            var arr = [];
+                            row.forEach((box)=>{
+                                for(var i=0; i<colors.length;i++){
+                                    if(box.color == colors[i]){
+                                        arr.push(0);
+                                        break;
+                                    }
+                                }
+                            });
+                            output.push(arr);
+                        });
+                        virtuosity.files.writeFile(__dirname + '/grid.JSON', JSON.stringify(output));
+                        console.log("saved");
+                    }
+                }
+            });
+
+
+            // For interacting with the simulation. For both creating the heatmaps and rooms, as well as running a single simulaiton. The actual simulation is run from the console
+            virtuosity.inputManager.keyboard.add.press("red", ['R']);
+            virtuosity.inputManager.keyboard.add.press("orange", ['O']);
+            virtuosity.inputManager.keyboard.add.press("yellow", ['Y']);
+            virtuosity.inputManager.keyboard.add.press("green", ['G']);
+            virtuosity.inputManager.keyboard.add.press("blue", ['B']);
+            virtuosity.inputManager.keyboard.add.press("purple", ['P']);
+            virtuosity.inputManager.keyboard.add.press("beige", ['E']);
+            virtuosity.inputManager.keyboard.add.press("black", ['N']);
+            virtuosity.inputManager.keyboard.add.press("save", ['CONTROL', 'S']);
+            virtuosity.inputManager.keyboard.add.press("run", ['ENTER']);
+            virtuosity.inputManager.keyboard.add.press("stop", ['S']);
+            virtuosity.engine2d.addToUpdate('main', ()=>{
+                mouse = virtuosity.collisionManager.shape.Point(Math.floor((virtuosity.inputManager.mouse.x - 70)/size), Math.floor((virtuosity.inputManager.mouse.y - 70)/size));
+
+                if(virtuosity.inputManager.mouse.left.down()){
+                    try{
+                        square = grid[mouse.x][mouse.y];
+                        square.color = color_box.color;
+                    }catch{}
+                }
+
+
+                if(virtuosity.inputManager.mouse.middle.release()){
+                    try{
+                        square = grid[mouse.x][mouse.y];
+                        square.color = next_color(square.color);
+                    }catch{}
+                }
+
+                if(virtuosity.inputManager.mouse.right.release()){
+                    try{
+                        square = grid[mouse.x][mouse.y];
+                        square.color = previous_color(square.color);
+                    }catch{}
+                }
+
+
+
+                if(virtuosity.inputManager.keyboard.check.press("red")){
+                    set_color(7);
+                }
+                if(virtuosity.inputManager.keyboard.check.press("orange")){
+                    set_color(6);
+                }
+                if(virtuosity.inputManager.keyboard.check.press("yellow")){
+                    set_color(5);
+                }
+                if(virtuosity.inputManager.keyboard.check.press("green")){
+                    set_color(4);
+                }
+                if(virtuosity.inputManager.keyboard.check.press("blue")){
+                    set_color(3);
+                }
+                if(virtuosity.inputManager.keyboard.check.press("purple")){
+                    set_color(2);
+                }
+                if(virtuosity.inputManager.keyboard.check.press("beige")){
+                    set_color(1);
+                }
+                if(virtuosity.inputManager.keyboard.check.press("black")){
+                    set_color(0);
+                }
+
+
+                if(virtuosity.inputManager.keyboard.check.press("save")){
+                    print_grid();
+                }
+
+
+                if(virtuosity.inputManager.keyboard.check.press('run')){
+                    players_escape();
+                }
+
+                if(virtuosity.inputManager.keyboard.check.press('stop')){
+                    escape_timer.stop();
+                }
+
+
+                if(saved_text.holding_alpha > 0){
+                    saved_text.holding_alpha -= 0.1;
+                }else if(saved_text.alpha > 0){
+                    saved_text.alpha -= 0.1;
+                }
+            });
+    </script>
+
+ </body>
+</html>
